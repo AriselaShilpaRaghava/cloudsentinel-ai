@@ -1,0 +1,45 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: cloudsentinel
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change_me}
+      POSTGRES_DB: cloudsentinel
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./database/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
+
+  ml_service:
+    build: ./ml_service
+    ports:
+      - "8001:8001"
+    environment:
+      PYTHONUNBUFFERED: "1"
+
+  backend_api:
+    build: ./backend
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql://cloudsentinel:${POSTGRES_PASSWORD:-change_me}@postgres:5432/cloudsentinel
+      ML_SERVICE_URL: http://ml_service:8001
+      JWT_SECRET: ${JWT_SECRET:-change_me}
+    depends_on:
+      - postgres
+      - ml_service
+
+  frontend:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      ML_SERVICE_URL: http://ml_service:8001
+    depends_on:
+      - backend_api
+
+volumes:
+  pg_data:

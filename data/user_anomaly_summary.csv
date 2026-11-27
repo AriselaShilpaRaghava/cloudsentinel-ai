@@ -1,0 +1,7 @@
+user_id,total_events,normal_predictions,anomaly_predictions,anomaly_percentage
+usr_dev_alice,11,8,3,27.27
+usr_dev_dave,14,6,8,57.14
+usr_dev_frank,7,5,2,28.57
+usr_ops_bob,9,8,1,11.11
+usr_ops_eve,6,0,6,100.0
+usr_sec_carol,7,5,2,28.57

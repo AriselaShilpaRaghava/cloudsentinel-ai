@@ -1,0 +1,7 @@
+"user_id","total_events","failed_events","unique_ips","sensitive_actions","off_hours_events"
+"usr_dev_alice","10","0","1","0","0"
+"usr_ops_bob","9","0","1","0","0"
+"usr_sec_carol","7","0","1","0","0"
+"usr_dev_dave","14","3","2","6","8"
+"usr_ops_eve","5","1","1","4","5"
+"usr_dev_frank","6","0","1","0","0"

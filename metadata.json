@@ -1,0 +1,6 @@
+{
+  "name": "CloudSentinel AI",
+  "description": "AI-Powered Insider Threat Detection and Cost-Aware Adaptive Security for Cloud and Serverless Environments.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

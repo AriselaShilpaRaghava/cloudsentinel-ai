@@ -1,0 +1,10 @@
+{
+    "model": "Isolation Forest",
+    "algorithm": "Unsupervised anomaly detection",
+    "input_events": 54,
+    "feature_count": 8,
+    "contamination": "auto",
+    "random_state": 42,
+    "ground_truth_labels_available": false,
+    "evaluation_status": "Pipeline experiment only"
+}

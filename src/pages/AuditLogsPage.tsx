@@ -1,7 +1,13 @@
 import React, { useEffect, useState } from 'react';
-import { FileUp, Search, Upload } from 'lucide-react';
+import { Database, FileUp, Search, Server, Upload, X } from 'lucide-react';
 import { api } from '../services/api';
-import type { AuthUser, DatasetRecord, NormalizedAuditEvent } from '../types/security';
+import type {
+  AuthUser,
+  DatasetRecord,
+  IngestionSummary,
+  LocalDatasetFileInfo,
+  NormalizedAuditEvent,
+} from '../types/security';
 import { DataStateWrapper, SectionHeader, StatusText, SurfacePanel } from '../components/ui/SocPrimitives';
 
 const SAMPLE_AWS_JSON = JSON.stringify(
@@ -41,9 +47,11 @@ os-nova-711,OpenStack Nova,2026-11-15T03:48:10Z,k.sato@corp.internal,NovaDeleteS
 export function AuditLogsPage({ currentUser }: { currentUser: AuthUser }) {
   const [events, setEvents] = useState<NormalizedAuditEvent[]>([]);
   const [datasets, setDatasets] = useState<DatasetRecord[]>([]);
+  const [localFiles, setLocalFiles] = useState<LocalDatasetFileInfo[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
+  const [datasetFilter, setDatasetFilter] = useState('ALL');
   const [providerFilter, setProviderFilter] = useState('ALL');
   const [statusFilter, setStatusFilter] = useState('ALL');
   const [search, setSearch] = useState('');
@@ -56,28 +64,36 @@ export function AuditLogsPage({ currentUser }: { currentUser: AuthUser }) {
   const [uploadFormat, setUploadFormat] = useState<'CSV' | 'JSON'>('JSON');
   const [uploadSource, setUploadSource] = useState('Manual Audit Batch');
   const [uploadContent, setUploadContent] = useState(SAMPLE_AWS_JSON);
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [uploadSummary, setUploadSummary] = useState<IngestionSummary | null>(null);
   const [uploadResult, setUploadResult] = useState<string | null>(null);
   const [uploadErr, setUploadErr] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
+  const [ingestingFile, setIngestingFile] = useState<string | null>(null);
+
+  const LARGE_FILE_THRESHOLD_BYTES = 1_000_000;
 
   const loadEvents = async (targetPage = page) => {
     setLoading(true);
     setError(null);
     try {
-      const [evRes, dsRes] = await Promise.all([
+      const [evRes, dsRes, localRes] = await Promise.all([
         api.getEvents({
           provider: providerFilter,
           status: statusFilter,
+          dataset_id: datasetFilter,
           search,
           page: targetPage,
           pageSize: 12,
         }),
         api.getDatasets(),
+        api.getLocalDatasets(),
       ]);
       setEvents(evRes.items);
       setTotal(evRes.total);
       setTotalPages(evRes.totalPages);
       setDatasets(dsRes.datasets);
+      setLocalFiles(localRes.files);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load audit events.');
     } finally {
@@ -87,7 +103,7 @@ export function AuditLogsPage({ currentUser }: { currentUser: AuthUser }) {
 
   useEffect(() => {
     loadEvents(page);
-  }, [page, providerFilter, statusFilter]);
+  }, [page, providerFilter, statusFilter, datasetFilter]);
 
   const handleSearchSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -101,6 +117,16 @@ export function AuditLogsPage({ currentUser }: { currentUser: AuthUser }) {
     if (file.name.toLowerCase().endsWith('.csv')) setUploadFormat('CSV');
     else if (file.name.toLowerCase().endsWith('.json')) setUploadFormat('JSON');
     setUploadSource(file.name);
+    setUploadSummary(null);
+    setUploadResult(null);
+    setUploadErr(null);
+
+    if (file.size > LARGE_FILE_THRESHOLD_BYTES) {
+      setSelectedFile(file);
+      return;
+    }
+
+    setSelectedFile(null);
     const reader = new FileReader();
     reader.onload = () => {
       setUploadContent(String(reader.result || ''));
@@ -112,22 +138,52 @@ export function AuditLogsPage({ currentUser }: { currentUser: AuthUser }) {
     e.preventDefault();
     setUploading(true);
     setUploadResult(null);
+    setUploadSummary(null);
     setUploadErr(null);
     try {
-      const res = await api.uploadAuditLogs({
-        content: uploadContent,
-        format: uploadFormat,
-        source_name: uploadSource,
-      });
-      setUploadResult(
-        `${res.message} Missing fields flagged: ${res.summary.missing_value_count}, Duplicates skipped: ${res.summary.duplicate_count}.`,
-      );
+      const res = selectedFile
+        ? await api.uploadAuditLogFile(selectedFile, {
+            format: uploadFormat,
+            source_name: uploadSource,
+          })
+        : await api.uploadAuditLogs({
+            content: uploadContent,
+            format: uploadFormat,
+            source_name: uploadSource,
+          });
+      setUploadSummary(res.summary);
+      setUploadResult(res.message);
       setPage(1);
       await loadEvents(1);
     } catch (err) {
       setUploadErr(err instanceof Error ? err.message : 'Upload validation failed.');
     } finally {
       setUploading(false);
+    }
+  };
+
+  const handleIngestLocal = async (file: LocalDatasetFileInfo) => {
+    setIngestingFile(file.filename);
+    setUploadResult(null);
+    setUploadSummary(null);
+    setUploadErr(null);
+    try {
+      const res = await api.ingestLocalDataset({
+        filename: file.filename,
+        dataset_role: file.suggested_role,
+      });
+      setUploadSummary(res.summary);
+      setUploadResult(
+        res.already_registered
+          ? `Dataset '${res.dataset.name}' already registered (0 new events imported; ${res.summary.skipped_rows} skipped).`
+          : `Ingested '${res.dataset.name}' (${res.summary.imported_rows} imported, ${res.summary.benign_count} benign, ${res.summary.attack_count} attack).`,
+      );
+      setPage(1);
+      await loadEvents(1);
+    } catch (err) {
+      setUploadErr(err instanceof Error ? err.message : 'Server-side dataset ingestion failed.');
+    } finally {
+      setIngestingFile(null);
     }
   };
 
@@ -172,6 +228,22 @@ export function AuditLogsPage({ currentUser }: { currentUser: AuthUser }) {
                   className="w-full bg-slate-950 border border-slate-700 rounded pl-9 pr-3 py-2 text-xs text-slate-100 focus:outline-none focus:border-indigo-500"
                 />
               </div>
+              <select
+                value={datasetFilter}
+                onChange={(e) => {
+                  setDatasetFilter(e.target.value);
+                  setPage(1);
+                }}
+                aria-label="Filter by dataset"
+                className="bg-slate-950 border border-slate-700 rounded px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-indigo-500 max-w-[220px]"
+              >
+                <option value="ALL">All Datasets</option>
+                {datasets.map((ds) => (
+                  <option key={ds.dataset_id} value={ds.dataset_id}>
+                    {ds.name} ({ds.imported_rows ?? ds.valid_rows})
+                  </option>
+                ))}
+              </select>
               <select
                 value={providerFilter}
                 onChange={(e) => {
@@ -311,11 +383,27 @@ export function AuditLogsPage({ currentUser }: { currentUser: AuthUser }) {
                         <span className="text-slate-200">{selectedEvent.provider}</span>
                       </div>
                       <div>
-                        <span className="text-slate-500 block">Provenance</span>
+                        <span className="text-slate-500 block">Identity Type / Provenance</span>
                         <span className="text-slate-200">
-                          {selectedEvent.is_simulated ? 'Simulated Benchmark' : 'Uploaded Audit Record'}
+                          {selectedEvent.identity_type || 'Standard'} ·{' '}
+                          {selectedEvent.is_simulated ? 'Simulated' : 'Ingested'}
                         </span>
                       </div>
+                      {selectedEvent.ground_truth_label !== undefined && (
+                        <div>
+                          <span className="text-slate-500 block">Ground Truth (Eval Only)</span>
+                          <span className={selectedEvent.ground_truth_label === 1 ? 'text-rose-400 font-medium' : 'text-emerald-400 font-medium'}>
+                            {selectedEvent.ground_truth_label === 1 ? 'Attack' : 'Benign'}
+                            {selectedEvent.attack_name ? ` (${selectedEvent.attack_name})` : ''}
+                          </span>
+                        </div>
+                      )}
+                      {selectedEvent.dataset_id && (
+                        <div>
+                          <span className="text-slate-500 block">Dataset ID</span>
+                          <span className="font-mono text-slate-300">{selectedEvent.dataset_id}</span>
+                        </div>
+                      )}
                     </div>
                     <div>
                       <span className="text-slate-400 block mb-1">Normalized Schema & Raw Payload</span>
@@ -396,14 +484,34 @@ export function AuditLogsPage({ currentUser }: { currentUser: AuthUser }) {
             </div>
 
             <div>
-              <label className="block text-slate-300 mb-1">Raw CSV / JSON Payload</label>
-              <textarea
-                rows={10}
-                required
-                value={uploadContent}
-                onChange={(e) => setUploadContent(e.target.value)}
-                className="w-full bg-slate-950 border border-slate-700 rounded p-3 font-mono text-[11px] text-slate-200 focus:outline-none focus:border-indigo-500"
-              />
+              <label className="block text-slate-300 mb-1">
+                {selectedFile ? 'Direct Stream File Selected (Bypassing Browser Textarea)' : 'Raw CSV / JSON Payload'}
+              </label>
+              {selectedFile ? (
+                <div className="p-4 bg-slate-950 border border-indigo-500/40 rounded flex items-center justify-between gap-4">
+                  <div className="space-y-1">
+                    <div className="font-mono text-slate-100 font-medium">{selectedFile.name}</div>
+                    <div className="text-slate-400">
+                      {(selectedFile.size / (1024 * 1024)).toFixed(2)} MB · Streaming directly to server-side CloudTrail normalizer
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setSelectedFile(null)}
+                    className="inline-flex items-center gap-1 px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded"
+                  >
+                    <X className="w-3.5 h-3.5" /> Clear File
+                  </button>
+                </div>
+              ) : (
+                <textarea
+                  rows={10}
+                  required
+                  value={uploadContent}
+                  onChange={(e) => setUploadContent(e.target.value)}
+                  className="w-full bg-slate-950 border border-slate-700 rounded p-3 font-mono text-[11px] text-slate-200 focus:outline-none focus:border-indigo-500"
+                />
+              )}
             </div>
 
             <div className="flex items-center justify-between gap-4">
@@ -421,7 +529,31 @@ export function AuditLogsPage({ currentUser }: { currentUser: AuthUser }) {
             </div>
 
             {uploadResult && (
-              <div className="p-3 bg-emerald-950/30 border border-emerald-500/30 rounded text-emerald-200">{uploadResult}</div>
+              <div className="p-3 bg-emerald-950/30 border border-emerald-500/30 rounded text-emerald-200 space-y-2">
+                <div>{uploadResult}</div>
+                {uploadSummary && (
+                  <div className="grid grid-cols-2 sm:grid-cols-6 gap-2 pt-2 border-t border-emerald-500/20 font-mono text-[11px]">
+                    <div>Source: {uploadSummary.total_rows}</div>
+                    <div>Normalized: {uploadSummary.normalized_rows}</div>
+                    <div>Imported: {uploadSummary.imported_rows}</div>
+                    <div>Rejected: {uploadSummary.rejected_rows}</div>
+                    <div>Skipped: {uploadSummary.skipped_rows}</div>
+                    <div>
+                      Labels: {uploadSummary.benign_count}B / {uploadSummary.attack_count}A
+                    </div>
+                  </div>
+                )}
+                {uploadSummary && (uploadSummary.skip_reasons.length > 0 || uploadSummary.rejection_reasons.length > 0) && (
+                  <div className="text-[11px] text-slate-300 space-y-0.5">
+                    {uploadSummary.skip_reasons.map((r, i) => (
+                      <div key={`skip-${i}`}>Skipped reason: {r}</div>
+                    ))}
+                    {uploadSummary.rejection_reasons.map((r, i) => (
+                      <div key={`rej-${i}`} className="text-amber-300">Rejected reason: {r}</div>
+                    ))}
+                  </div>
+                )}
+              </div>
             )}
             {uploadErr && (
               <div className="p-3 bg-rose-950/30 border border-rose-500/30 rounded text-rose-200">{uploadErr}</div>
@@ -432,31 +564,88 @@ export function AuditLogsPage({ currentUser }: { currentUser: AuthUser }) {
 
       {activeTab === 'datasets' && (
         <div className="space-y-4">
+          {localFiles.length > 0 && (
+            <SurfacePanel
+              title="Server-Side Workspace Datasets (Safe Local Ingestion)"
+              subtitle="Ingest large CloudTrail datasets directly on the backend without loading 50 MB JSON into the browser"
+            >
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+                {localFiles.map((lf) => (
+                  <div
+                    key={lf.filename}
+                    className="p-3.5 bg-slate-950/70 border border-slate-800 rounded-lg flex items-center justify-between gap-3"
+                  >
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2 font-mono text-slate-100 font-medium truncate">
+                        <Server className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+                        <span className="truncate">{lf.filename}</span>
+                      </div>
+                      <div className="text-slate-400 mt-1 flex items-center gap-2">
+                        <span>{(lf.size_bytes / (1024 * 1024)).toFixed(2)} MB</span>
+                        <span aria-hidden="true">·</span>
+                        <span>{lf.format}</span>
+                        <span aria-hidden="true">·</span>
+                        <span className="text-indigo-300 uppercase font-mono text-[10px]">{lf.suggested_role}</span>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      disabled={ingestingFile !== null || currentUser.role === 'Viewer' || lf.already_registered}
+                      onClick={() => handleIngestLocal(lf)}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white font-medium rounded whitespace-nowrap shrink-0"
+                    >
+                      <Database className="w-3.5 h-3.5" />
+                      {lf.already_registered
+                        ? 'Ingested'
+                        : ingestingFile === lf.filename
+                          ? 'Ingesting...'
+                          : 'Ingest on Server'}
+                    </button>
+                  </div>
+                ))}
+              </div>
+              {uploadResult && (
+                <div className="mt-3 p-3 bg-emerald-950/30 border border-emerald-500/30 rounded text-xs text-emerald-200">
+                  {uploadResult}
+                </div>
+              )}
+              {uploadErr && (
+                <div className="mt-3 p-3 bg-rose-950/30 border border-rose-500/30 rounded text-xs text-rose-200">
+                  {uploadErr}
+                </div>
+              )}
+            </SurfacePanel>
+          )}
+
           {datasets.map((ds) => (
             <SurfacePanel
               key={ds.dataset_id}
               title={ds.name}
-              subtitle={ds.provenance}
+              subtitle={`${ds.provenance}${ds.dataset_role ? ` · Role: ${ds.dataset_role}` : ''}`}
               rightSlot={<StatusText status={ds.preprocessed ? 'Preprocessed' : 'Raw'} />}
             >
               <div className="grid grid-cols-2 md:grid-cols-6 gap-4 text-xs border-b border-slate-800 pb-4">
                 <div>
-                  <span className="text-slate-400 block">Format</span>
-                  <span className="font-mono text-slate-100">{ds.source_type}</span>
+                  <span className="text-slate-400 block">Dataset ID / Format</span>
+                  <span className="font-mono text-slate-100">{ds.dataset_id} · {ds.source_type}</span>
                 </div>
                 <div>
-                  <span className="text-slate-400 block">Valid / Total Rows</span>
+                  <span className="text-slate-400 block">Imported / Normalized / Total</span>
                   <span className="font-mono tabular-nums text-slate-100">
-                    {ds.valid_rows} / {ds.total_rows}
+                    {ds.imported_rows ?? ds.valid_rows} / {ds.normalized_rows ?? ds.valid_rows} / {ds.total_rows}
                   </span>
                 </div>
                 <div>
-                  <span className="text-slate-400 block">Missing Values</span>
-                  <span className="font-mono tabular-nums text-slate-100">{ds.missing_value_count}</span>
+                  <span className="text-slate-400 block">Rejected / Skipped</span>
+                  <span className="font-mono tabular-nums text-slate-100">
+                    {ds.rejected_rows ?? 0} rej · {ds.skipped_rows ?? ds.duplicate_count} skip
+                  </span>
                 </div>
                 <div>
-                  <span className="text-slate-400 block">Duplicates Removed</span>
-                  <span className="font-mono tabular-nums text-slate-100">{ds.duplicate_count}</span>
+                  <span className="text-slate-400 block">Labels (Benign / Attack)</span>
+                  <span className="font-mono tabular-nums text-slate-100">
+                    {ds.benign_count ?? 0} B · {ds.attack_count ?? 0} A
+                  </span>
                 </div>
                 <div>
                   <span className="text-slate-400 block">Original vs Adapted FaaS</span>
@@ -472,6 +661,16 @@ export function AuditLogsPage({ currentUser }: { currentUser: AuthUser }) {
                   </span>
                 </div>
               </div>
+              {(ds.skip_reasons?.length || ds.rejection_reasons?.length) ? (
+                <div className="pt-2.5 text-[11px] text-slate-400 space-y-0.5 border-b border-slate-800/70 pb-2.5">
+                  {ds.skip_reasons?.map((r, i) => (
+                    <div key={`ds-skip-${i}`}>Skipped: {r}</div>
+                  ))}
+                  {ds.rejection_reasons?.map((r, i) => (
+                    <div key={`ds-rej-${i}`} className="text-amber-300">Rejected: {r}</div>
+                  ))}
+                </div>
+              ) : null}
               <div className="pt-3 text-xs text-slate-400">
                 Extracted Feature Vector ({ds.features_extracted.length}):{' '}
                 <span className="font-mono text-slate-300">{ds.features_extracted.join(', ')}</span>

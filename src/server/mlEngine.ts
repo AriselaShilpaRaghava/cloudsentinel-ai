@@ -137,20 +137,43 @@ export function extractFeatures(event: NormalizedAuditEvent): ExtractedFeatureVe
   const is_after_hours = !isService && (hour < 7 || hour >= 20) ? 1 : 0;
 
   const meta = USER_METADATA[event.cloud_user_id];
+  const isAwsServiceEndpoint =
+    event.source_ip.endsWith('.amazonaws.com') || event.source_ip === 'AWS Internal';
   const isInternalCorp = KNOWN_CORP_PREFIXES.some((prefix) => event.source_ip.startsWith(prefix));
-  const isKnownIp = meta ? meta.known_ips.includes(event.source_ip) : isInternalCorp;
-  const is_unusual_ip = !isKnownIp && !isInternalCorp ? 1 : !isKnownIp ? 0.45 : 0;
+  const isPrivateOpenStackNet =
+    isInternalCorp ||
+    event.source_ip.startsWith('192.168.') ||
+    event.source_ip === '127.0.0.1';
+  const isKnownIp = meta ? meta.known_ips.includes(event.source_ip) : isInternalCorp || isAwsServiceEndpoint;
+  const isOpenStack = event.provider.startsWith('OpenStack');
+  const is_unusual_ip = isAwsServiceEndpoint
+    ? 0
+    : meta
+      ? !isKnownIp && !isInternalCorp
+        ? 1
+        : !isKnownIp
+          ? 0.45
+          : 0
+      : event.identity_type === 'Anonymous'
+        ? 1
+        : isOpenStack && event.source_ip !== '0.0.0.0' && !isPrivateOpenStackNet
+          ? 0.85
+          : 0;
 
   const is_failed_auth = event.status === 'Failed' || event.status === 'Denied' ? 1 : 0;
 
   const actionLower = event.action.toLowerCase();
+  const resLower = event.resource.toLowerCase();
+  const raw = event.raw_event || {};
   let action_criticality = 0.2;
   if (
     actionLower.includes('attachuserpolicy') ||
     actionLower.includes('createaccesskey') ||
     actionLower.includes('delete') ||
     actionLower.includes('assumerole') ||
-    actionLower.includes('putuserpolicy')
+    actionLower.includes('putuserpolicy') ||
+    actionLower.includes('role_assignment') ||
+    (isOpenStack && (actionLower.includes('security_group_rule') || resLower.includes('0.0.0.0/0') || String(raw.remote_ip_prefix || '') === '0.0.0.0/0'))
   ) {
     action_criticality = 0.92;
   } else if (
@@ -162,10 +185,9 @@ export function extractFeatures(event: NormalizedAuditEvent): ExtractedFeatureVe
   } else if (actionLower.includes('invoke')) {
     action_criticality = 0.45;
   } else if (actionLower.includes('login') || actionLower.includes('auth')) {
-    action_criticality = event.status === 'Failed' ? 0.65 : 0.25;
+    action_criticality = event.status === 'Failed' || event.status === 'Denied' ? 0.65 : 0.25;
   }
 
-  const resLower = event.resource.toLowerCase();
   let resource_sensitivity = 0.25;
   if (
     resLower.includes('secret') ||
@@ -173,7 +195,8 @@ export function extractFeatures(event: NormalizedAuditEvent): ExtractedFeatureVe
     resLower.includes('payroll') ||
     resLower.includes('pii') ||
     resLower.includes('ledger') ||
-    resLower.includes('prod-core')
+    resLower.includes('prod-core') ||
+    resLower.includes('role-admin')
   ) {
     resource_sensitivity = 0.95;
   } else if (resLower.includes('datalake') || resLower.includes('prototype') || resLower.includes('compliance')) {
@@ -185,7 +208,6 @@ export function extractFeatures(event: NormalizedAuditEvent): ExtractedFeatureVe
   else if (meta?.privilege_level === 'Elevated') user_privilege_level = 0.72;
   else if (meta?.privilege_level === 'Service Account') user_privilege_level = 0.68;
 
-  const raw = event.raw_event || {};
   const burstVal = Number(raw.requestCountIn2Min || 0);
   const api_burst_zscore = burstVal > 100 || actionLower.includes('burst') ? 0.95 : 0.1;
 
@@ -218,9 +240,11 @@ function classifyScenario(event: NormalizedAuditEvent, f: ExtractedFeatureVector
   if (f.is_dormant_account && f.is_faas_spike) return 'Dormant Account Reactivation & Abnormal Serverless Invocation';
   if (f.is_dormant_account) return 'Unusual Access by Previously Inactive Account';
   if (f.is_faas_spike) return 'Abnormal Serverless Function Invocation Burst';
-  if (event.action === 'AttachUserPolicy' || event.action === 'CreateAccessKey')
-    return 'Privilege Escalation & Unusual IAM Permission Change';
-  if (f.is_bulk_download) return 'Bulk Data Download from Sensitive Storage';
+  if (event.action === 'AttachUserPolicy' || event.action === 'CreateAccessKey' || event.action.toLowerCase().includes('role_assignment'))
+    return 'Privilege Escalation & Unusual Permission Change';
+  if (event.action.toLowerCase().includes('security_group'))
+    return 'Security Group & Network Ingress Exposure';
+  if (f.is_bulk_download) return 'Bulk Data Download / Snapshot Export from Sensitive Storage';
   if (event.action === 'GetSecretValue') return 'Sensitive Credential & Secret Access';
   if (event.action === 'NovaDeleteServer' || event.action.toLowerCase().includes('delete'))
     return 'Suspicious Cloud Resource Deletion';
@@ -245,12 +269,28 @@ export interface IsolationForestPredictionSignal {
   model_version: string;
 }
 
+export function buildEventsByUserMap(
+  events: NormalizedAuditEvent[],
+): Map<string, NormalizedAuditEvent[]> {
+  const byUser = new Map<string, NormalizedAuditEvent[]>();
+  for (const ev of events) {
+    const list = byUser.get(ev.cloud_user_id);
+    if (list) {
+      list.push(ev);
+    } else {
+      byUser.set(ev.cloud_user_id, [ev]);
+    }
+  }
+  return byUser;
+}
+
 export function evaluateEvent(
   event: NormalizedAuditEvent,
   allEvents: NormalizedAuditEvent[],
   weights: RiskEngineWeights,
   executionModeLabel: string,
   modelSignal?: IsolationForestPredictionSignal,
+  eventsByUser?: Map<string, NormalizedAuditEvent[]>,
 ): ThreatPrediction {
   const f = extractFeatures(event);
 
@@ -275,17 +315,42 @@ export function evaluateEvent(
   if (event.raw_event && String(event.raw_event.note || '').includes('sparse')) qualityPenalties += 0.25;
   const data_quality_score = Math.max(0.35, Number((1 - qualityPenalties).toFixed(2)));
 
-  // Corroborating events for the same user within window
-  const relatedEvents = allEvents.filter(
-    (other) => other.cloud_user_id === event.cloud_user_id && other.event_id !== event.event_id,
-  );
-  const evidenceStrength = Math.min(1, 0.35 + relatedEvents.length * 0.14);
+  // Corroborating events for the same user within window (O(1) with pre-indexed user map)
+  const userPool = eventsByUser ? (eventsByUser.get(event.cloud_user_id) ?? []) : null;
+  let relatedCount = 0;
+  const corroboratingIds: string[] = [];
+  if (userPool) {
+    for (let i = 0; i < userPool.length; i++) {
+      const other = userPool[i];
+      if (other.event_id !== event.event_id) {
+        relatedCount += 1;
+        if (corroboratingIds.length < 3) {
+          corroboratingIds.push(other.event_id);
+        } else if (eventsByUser) {
+          // Every entry in userPool shares event.cloud_user_id
+          relatedCount = Math.max(0, userPool.length - 1);
+          break;
+        }
+      }
+    }
+  } else {
+    for (let i = 0; i < allEvents.length; i++) {
+      const other = allEvents[i];
+      if (other.cloud_user_id === event.cloud_user_id && other.event_id !== event.event_id) {
+        relatedCount += 1;
+        if (corroboratingIds.length < 3) {
+          corroboratingIds.push(other.event_id);
+        }
+      }
+    }
+  }
+  const evidenceStrength = Math.min(1, 0.35 + relatedCount * 0.14);
 
   // Separate Prediction Confidence from Anomaly Score
   const signalAgreement =
     [f.is_unusual_ip >= 0.8, f.is_after_hours === 1, f.is_bulk_download === 1, f.is_dormant_account === 1, f.is_faas_spike === 1, f.action_criticality > 0.7]
       .filter(Boolean).length;
-  const baseConfidence = 0.42 + signalAgreement * 0.13 + (relatedEvents.length >= 2 ? 0.12 : 0);
+  const baseConfidence = 0.42 + signalAgreement * 0.13 + (relatedCount >= 2 ? 0.12 : 0);
   const prediction_confidence = Math.min(0.98, Math.max(0.28, Number((baseConfidence * data_quality_score).toFixed(2))));
 
   // Risk Score via configurable Risk Assessment Engine weights
@@ -325,13 +390,14 @@ export function evaluateEvent(
   const isAnomalous = modelSignal
     ? modelSignal.anomaly_prediction === 'anomaly'
     : anomaly_score >= 0.42;
+  const hasProfiledUser = Boolean(USER_METADATA[event.cloud_user_id]);
   if (isAnomalous) {
     if (prediction_confidence < weights.confidence_threshold || data_quality_score < 0.7) {
       investigation_status = 'Requires Additional Investigation';
     } else {
       investigation_status = 'High-Confidence Alert';
     }
-  } else if (f.is_failed_auth || f.is_unusual_ip > 0) {
+  } else if (f.is_failed_auth || (hasProfiledUser && f.is_unusual_ip > 0)) {
     investigation_status = 'Requires Additional Investigation';
   }
 
@@ -385,7 +451,7 @@ export function evaluateEvent(
     model_version: modelSignal?.model_version || 'iforest-seq-proxy-v1.2',
     execution_mode: executionModeLabel,
     explanation,
-    evidence_events: [event.event_id, ...relatedEvents.slice(0, 3).map((r) => r.event_id)],
+    evidence_events: [event.event_id, ...corroboratingIds],
     recommended_steps,
     factor_contributions: {
       anomaly_contribution,
@@ -666,6 +732,8 @@ export function runRealExperimentOnDataset(
     execution_mode: `${executionMode} (Split ${Math.round(splitRatio.train * 100)}/${Math.round(
       splitRatio.val * 100,
     )}/${Math.round(splitRatio.test * 100)}, Threshold=${weights.confidence_threshold})`,
+    is_simulated: true,
+    has_ground_truth: true,
     trained_at: new Date().toISOString(),
     train_size: trainSize,
     val_size: valSize,

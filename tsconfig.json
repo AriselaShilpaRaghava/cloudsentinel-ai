@@ -24,5 +24,20 @@
     "allowImportingTsExtensions": true,
     "noEmit": true
   },
-  "exclude": ["dist"]
+  "exclude": [
+    "dist",
+    "src/pages/AnomalyDetection.tsx",
+    "src/pages/AuditLogs.tsx",
+    "src/pages/Dashboard.tsx",
+    "src/pages/FaasMonitoring.tsx",
+    "src/pages/IncidentManagement.tsx",
+    "src/pages/InsiderThreats.tsx",
+    "src/pages/ModelPerformance.tsx",
+    "src/pages/OpenStackIntegration.tsx",
+    "src/pages/PolicyOptimization.tsx",
+    "src/pages/Preprocessing.tsx",
+    "src/pages/Reports.tsx",
+    "src/pages/RiskAssessment.tsx",
+    "src/pages/Settings.tsx"
+  ]
 }

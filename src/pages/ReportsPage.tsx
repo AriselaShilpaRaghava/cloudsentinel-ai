@@ -3,7 +3,6 @@ import { Download, FileText } from 'lucide-react';
 import { api } from '../services/api';
 import {
   downloadFullCsvSummary,
-  downloadSecurityPdfReport,
   type ReportPayload,
 } from '../services/reportGenerator';
 import { DataStateWrapper, SectionHeader, SurfacePanel } from '../components/ui/SocPrimitives';
@@ -14,6 +13,8 @@ export function ReportsPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
+  const [pdfError, setPdfError] = useState<string | null>(null);
+  const [downloadingPdf, setDownloadingPdf] = useState(false);
 
   const loadReportData = async () => {
     setLoading(true);
@@ -46,14 +47,53 @@ export function ReportsPage() {
     loadReportData();
   }, []);
 
-  const handleDownloadPdf = () => {
-    if (!payload) return;
-    downloadSecurityPdfReport(payload);
-    setStatusMsg('Generated and downloaded multi-section PDF security & cost optimization report.');
+  const handleDownloadPdf = async () => {
+    setDownloadingPdf(true);
+    setStatusMsg(null);
+    setPdfError(null);
+    try {
+      const res = await fetch('/api/reports/pdf', { method: 'GET' });
+      if (!res.ok) {
+        let errMessage = `PDF download failed with HTTP ${res.status}.`;
+        try {
+          const errJson = (await res.json()) as { error?: string };
+          if (errJson?.error) errMessage = errJson.error;
+        } catch {
+          // Ignore non-JSON error body
+        }
+        throw new Error(errMessage);
+      }
+
+      const contentType = res.headers.get('Content-Type') || '';
+      if (!contentType.includes('application/pdf')) {
+        throw new Error(`Unexpected response Content-Type: ${contentType || 'unknown'}`);
+      }
+
+      const blob = await res.blob();
+      if (blob.size === 0) {
+        throw new Error('Server returned an empty PDF document.');
+      }
+
+      const objectUrl = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = objectUrl;
+      link.download = 'cloudsentinel-report.pdf';
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+
+      setStatusMsg('Downloaded PDF security & cost optimization report from /api/reports/pdf.');
+    } catch (err) {
+      setPdfError(err instanceof Error ? err.message : 'Failed to download PDF report.');
+    } finally {
+      setDownloadingPdf(false);
+    }
   };
 
   const handleDownloadCsv = () => {
     if (!payload) return;
+    setPdfError(null);
     downloadFullCsvSummary(payload);
     setStatusMsg('Exported comprehensive CSV summary covering anomalies, incidents, ML evaluations, and policies.');
   };
@@ -76,12 +116,12 @@ export function ReportsPage() {
             </button>
             <button
               type="button"
-              disabled={!payload}
+              disabled={!payload || downloadingPdf}
               onClick={handleDownloadPdf}
               className="inline-flex items-center gap-2 px-3.5 py-2 text-xs font-medium bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white rounded-md whitespace-nowrap"
             >
               <FileText className="w-3.5 h-3.5" />
-              Download PDF Report
+              {downloadingPdf ? 'Generating PDF...' : 'Download PDF Report'}
             </button>
           </div>
         }
@@ -90,6 +130,12 @@ export function ReportsPage() {
       {statusMsg && (
         <div className="px-4 py-2 bg-emerald-950/30 border border-emerald-500/30 rounded text-xs text-emerald-200">
           {statusMsg}
+        </div>
+      )}
+
+      {pdfError && (
+        <div className="px-4 py-2 bg-rose-950/30 border border-rose-500/30 rounded text-xs text-rose-200">
+          {pdfError}
         </div>
       )}
 
@@ -133,7 +179,7 @@ export function ReportsPage() {
                 </div>
               </SurfacePanel>
 
-              <SurfacePanel title="ML Evaluation Summary">
+              <SurfacePanel title="ML Evaluation & Export Endpoints">
                 <div className="space-y-1.5 text-slate-300">
                   <div className="flex justify-between">
                     <span>Executed Experiments</span>
@@ -144,6 +190,16 @@ export function ReportsPage() {
                     <span className="font-mono tabular-nums text-indigo-300">
                       {payload.experiments[0] ? `${(payload.experiments[0].metrics.f1_score * 100).toFixed(1)}%` : 'N/A'}
                     </span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span>PDF Report Endpoint</span>
+                    <a
+                      href="/api/reports/pdf"
+                      download="cloudsentinel-report.pdf"
+                      className="text-indigo-400 hover:underline font-mono"
+                    >
+                      /api/reports/pdf
+                    </a>
                   </div>
                   <div className="flex justify-between">
                     <span>Raw Event CSV Endpoint</span>

@@ -25,8 +25,10 @@ export function ThreatDetectionPage({
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [filterMode, setFilterMode] = useState<'ALL' | 'High-Confidence Alert' | 'Requires Additional Investigation'>('ALL');
+  const [page, setPage] = useState(1);
   const [selectedPred, setSelectedPred] = useState<ThreatPrediction | null>(null);
   const [actionMsg, setActionMsg] = useState<string | null>(null);
+  const PAGE_SIZE = 50;
 
   const loadPredictions = async () => {
     setLoading(true);
@@ -84,6 +86,9 @@ export function ThreatDetectionPage({
     if (filterMode === 'ALL') return p.investigation_status !== 'Normal Baseline';
     return p.investigation_status === filterMode;
   });
+  const totalPages = Math.max(1, Math.ceil(visible.length / PAGE_SIZE));
+  const safePage = Math.min(page, totalPages);
+  const pagedVisible = visible.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
 
   return (
     <div className="space-y-6">
@@ -123,7 +128,10 @@ export function ThreatDetectionPage({
           <button
             key={tab.id}
             type="button"
-            onClick={() => setFilterMode(tab.id as typeof filterMode)}
+            onClick={() => {
+              setFilterMode(tab.id as typeof filterMode);
+              setPage(1);
+            }}
             className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap ${
               filterMode === tab.id ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-slate-200'
             }`}
@@ -155,7 +163,7 @@ export function ThreatDetectionPage({
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-800/60">
-                  {visible.map((pred) => (
+                  {pagedVisible.map((pred) => (
                     <tr
                       key={pred.prediction_id}
                       onClick={() => setSelectedPred(pred)}
@@ -189,6 +197,31 @@ export function ThreatDetectionPage({
                 </tbody>
               </table>
             </div>
+            {visible.length > PAGE_SIZE && (
+              <div className="mt-4 pt-4 border-t border-slate-800/80 flex items-center justify-between text-xs text-slate-400">
+                <span className="font-mono tabular-nums">
+                  Page {safePage} of {totalPages} ({visible.length} flagged predictions)
+                </span>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    disabled={safePage <= 1}
+                    onClick={() => setPage((p) => Math.max(1, p - 1))}
+                    className="px-3 py-1 bg-slate-900 border border-slate-700 rounded disabled:opacity-40 hover:bg-slate-800 text-slate-200"
+                  >
+                    Previous
+                  </button>
+                  <button
+                    type="button"
+                    disabled={safePage >= totalPages}
+                    onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                    className="px-3 py-1 bg-slate-900 border border-slate-700 rounded disabled:opacity-40 hover:bg-slate-800 text-slate-200"
+                  >
+                    Next
+                  </button>
+                </div>
+              </div>
+            )}
           </SurfacePanel>
 
           {selectedPred && (

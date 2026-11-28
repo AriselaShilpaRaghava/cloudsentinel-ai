@@ -16,3 +16,5 @@ data/cloudtrail_training.json
 data/cloudtrail_testing.json
 data/evaluate_cloudtrail.py
 data/load_cloudtrail.py
+
+!data/isolation_forest_cloudtrail.joblib
